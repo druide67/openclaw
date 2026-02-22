@@ -317,7 +317,7 @@ describe("createSynologyChatPlugin", () => {
   });
 
   describe("gateway", () => {
-    it("startAccount returns stop function for disabled account", async () => {
+    it("startAccount returns pending promise for disabled account", async () => {
       const plugin = createSynologyChatPlugin();
       const ctx = {
         cfg: {
@@ -326,11 +326,17 @@ describe("createSynologyChatPlugin", () => {
         accountId: "default",
         log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       };
-      const result = await plugin.gateway.startAccount(ctx);
-      expect(typeof result.stop).toBe("function");
+      const result = plugin.gateway.startAccount(ctx);
+      expect(result).toBeInstanceOf(Promise);
+      // Promise should stay pending (never resolve) to prevent restart loop
+      const resolved = await Promise.race([
+        result,
+        new Promise((r) => setTimeout(() => r("pending"), 50)),
+      ]);
+      expect(resolved).toBe("pending");
     });
 
-    it("startAccount returns stop function for account without token", async () => {
+    it("startAccount returns pending promise for account without token", async () => {
       const plugin = createSynologyChatPlugin();
       const ctx = {
         cfg: {
@@ -339,8 +345,14 @@ describe("createSynologyChatPlugin", () => {
         accountId: "default",
         log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       };
-      const result = await plugin.gateway.startAccount(ctx);
-      expect(typeof result.stop).toBe("function");
+      const result = plugin.gateway.startAccount(ctx);
+      expect(result).toBeInstanceOf(Promise);
+      // Promise should stay pending (never resolve) to prevent restart loop
+      const resolved = await Promise.race([
+        result,
+        new Promise((r) => setTimeout(() => r("pending"), 50)),
+      ]);
+      expect(resolved).toBe("pending");
     });
 
     it("startAccount refuses allowlist accounts with empty allowedUserIds", async () => {
@@ -377,7 +389,9 @@ describe("createSynologyChatPlugin", () => {
       registerMock.mockReturnValueOnce(unregisterFirst).mockReturnValueOnce(unregisterSecond);
 
       const plugin = createSynologyChatPlugin();
-      const ctx = {
+      const abortFirst = new AbortController();
+      const abortSecond = new AbortController();
+      const makeCtx = (abortCtrl: AbortController) => ({
         cfg: {
           channels: {
             "synology-chat": {
@@ -392,18 +406,25 @@ describe("createSynologyChatPlugin", () => {
         },
         accountId: "default",
         log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      };
+        abortSignal: abortCtrl.signal,
+      });
 
-      const first = await plugin.gateway.startAccount(ctx);
-      const second = await plugin.gateway.startAccount(ctx);
+      // Start first account (returns a pending promise)
+      const firstPromise = plugin.gateway.startAccount(makeCtx(abortFirst));
+      // Start second account on same path — should deregister the first route
+      const secondPromise = plugin.gateway.startAccount(makeCtx(abortSecond));
+
+      // Give microtasks time to settle
+      await new Promise((r) => setTimeout(r, 10));
 
       expect(registerMock).toHaveBeenCalledTimes(2);
       expect(unregisterFirst).toHaveBeenCalledTimes(1);
       expect(unregisterSecond).not.toHaveBeenCalled();
 
-      // Clean up active route map so this module-level state doesn't leak across tests.
-      first.stop();
-      second.stop();
+      // Clean up: abort both to resolve promises and prevent test leak
+      abortFirst.abort();
+      abortSecond.abort();
+      await Promise.allSettled([firstPromise, secondPromise]);
     });
   });
 });
