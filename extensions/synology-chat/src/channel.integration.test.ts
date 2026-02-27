@@ -98,6 +98,8 @@ describe("Synology channel wiring integration", () => {
     expect(res._body).toContain("not authorized");
     expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
 
-    started.stop();
+    if (started && typeof started === "object" && "stop" in started) {
+      (started as { stop: () => void }).stop();
+    }
   });
 });

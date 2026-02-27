@@ -358,7 +358,8 @@ describe("createSynologyChatPlugin", () => {
       };
 
       const result = await plugin.gateway.startAccount(ctx);
-      expect(typeof result.stop).toBe("function");
+      expect(result).toBeTruthy();
+      expect(typeof (result as { stop: () => void }).stop).toBe("function");
       expect(ctx.log.warn).toHaveBeenCalledWith(expect.stringContaining("empty allowedUserIds"));
       expect(registerMock).not.toHaveBeenCalled();
     });
