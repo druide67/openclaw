@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeFormBody, makeReq, makeRes } from "./test-http-utils.js";
 
@@ -45,39 +44,6 @@ vi.mock("./client.js", () => ({
 }));
 
 const { createSynologyChatPlugin } = await import("./channel.js");
-
-function makeReq(method: string, body: string): IncomingMessage {
-  const readable = new Readable({
-    read() {
-      this.push(Buffer.from(body));
-      this.push(null);
-    },
-  });
-  const req = readable as unknown as IncomingMessage;
-  req.method = method;
-  (req as any).socket = { remoteAddress: "127.0.0.1" };
-  return req;
-}
-
-function makeRes(): ServerResponse & { _status: number; _body: string } {
-  const res = {
-    _status: 0,
-    _body: "",
-    writeHead(statusCode: number, _headers: Record<string, string>) {
-      res._status = statusCode;
-    },
-    end(body?: string) {
-      res._body = body ?? "";
-    },
-  } as any;
-  return res;
-}
-
-function makeFormBody(fields: Record<string, string>): string {
-  return Object.entries(fields)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-    .join("&");
-}
 describe("Synology channel wiring integration", () => {
   beforeEach(() => {
     registerPluginHttpRouteMock.mockClear();
@@ -86,6 +52,7 @@ describe("Synology channel wiring integration", () => {
 
   it("registers real webhook handler with resolved account config and enforces allowlist", async () => {
     const plugin = createSynologyChatPlugin();
+    const abortController = new AbortController();
     const ctx = {
       cfg: {
         channels: {
@@ -106,9 +73,10 @@ describe("Synology channel wiring integration", () => {
       },
       accountId: "alerts",
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      abortSignal: abortController.signal,
     };
 
-    const started = await plugin.gateway.startAccount(ctx);
+    const started = plugin.gateway.startAccount(ctx);
     expect(registerPluginHttpRouteMock).toHaveBeenCalledTimes(1);
 
     const firstCall = registerPluginHttpRouteMock.mock.calls[0];
@@ -134,9 +102,7 @@ describe("Synology channel wiring integration", () => {
     expect(res._status).toBe(403);
     expect(res._body).toContain("not authorized");
     expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
-
-    if (started && typeof started === "object" && "stop" in started) {
-      (started as { stop: () => void }).stop();
-    }
+    abortController.abort();
+    await started;
   });
 });
