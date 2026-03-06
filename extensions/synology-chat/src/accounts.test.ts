@@ -44,6 +44,17 @@ describe("listAccountIds", () => {
     expect(ids).toContain("home");
   });
 
+  it("returns ['default'] for channel-only setup (channelTokens, no bot token)", () => {
+    const cfg = {
+      channels: {
+        "synology-chat": {
+          channelTokens: { "9": "channel-tok" },
+        },
+      },
+    };
+    expect(listAccountIds(cfg)).toEqual(["default"]);
+  });
+
   it("returns default + named accounts", () => {
     const cfg = {
       channels: {

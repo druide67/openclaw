@@ -121,12 +121,16 @@ export function createSynologyChatPlugin() {
       },
       collectWarnings: ({ account }: { account: ResolvedSynologyChatAccount }) => {
         const warnings: string[] = [];
-        if (!account.token) {
+        const hasChannelTokens = Object.keys(account.channelTokens).length > 0;
+        const hasChannelWebhooks = Object.keys(account.channelWebhooks).length > 0;
+        // Only warn about missing bot token/incomingUrl when no channel config exists.
+        // A channel-only setup (channelTokens + channelWebhooks, no bot DM) is valid.
+        if (!account.token && !hasChannelTokens) {
           warnings.push(
             "- Synology Chat: token is not configured. The webhook will reject all requests.",
           );
         }
-        if (!account.incomingUrl) {
+        if (!account.incomingUrl && !hasChannelWebhooks) {
           warnings.push(
             "- Synology Chat: incomingUrl is not configured. The bot cannot send replies.",
           );
@@ -262,15 +266,20 @@ export function createSynologyChatPlugin() {
           return new Promise<void>(() => {});
         }
 
-        if (!account.token || !account.incomingUrl) {
+        const hasChannelConfig = Object.keys(account.channelTokens).length > 0;
+        if (!hasChannelConfig && (!account.token || !account.incomingUrl)) {
           log?.warn?.(
-            `Synology Chat account ${accountId} not fully configured (missing token or incomingUrl)`,
+            `Synology Chat account ${accountId} not fully configured (missing token or incomingUrl, and no channelTokens)`,
           );
           return new Promise<void>(() => {});
         }
-        if (account.dmPolicy === "allowlist" && account.allowedUserIds.length === 0) {
+        if (
+          account.dmPolicy === "allowlist" &&
+          account.allowedUserIds.length === 0 &&
+          !hasChannelConfig
+        ) {
           log?.warn?.(
-            `Synology Chat account ${accountId} has dmPolicy=allowlist but empty allowedUserIds; refusing to start route`,
+            `Synology Chat account ${accountId} has dmPolicy=allowlist but empty allowedUserIds and no channelTokens; refusing to start route`,
           );
           return { stop: () => {} };
         }

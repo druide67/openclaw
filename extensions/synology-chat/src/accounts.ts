@@ -63,9 +63,13 @@ export function listAccountIds(cfg: any): string[] {
 
   const ids = new Set<string>();
 
-  // If base config has a token, there's a "default" account
+  // If base config has a token OR channel tokens, there's a "default" account.
+  // A channel-only setup (no bot DM token, only channelTokens) is valid.
   const hasBaseToken = channelCfg.token || process.env.SYNOLOGY_CHAT_TOKEN;
-  if (hasBaseToken) {
+  const hasChannelTokens =
+    Object.keys(parseChannelTokensFromEnv()).length > 0 ||
+    Object.keys(channelCfg.channelTokens ?? {}).length > 0;
+  if (hasBaseToken || hasChannelTokens) {
     ids.add("default");
   }
 
