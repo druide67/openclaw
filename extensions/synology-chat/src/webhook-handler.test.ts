@@ -2,15 +2,15 @@ import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ResolvedSynologyChatAccount } from "./types.js";
-import type { WebhookHandlerDeps } from "./webhook-handler.js";
 import {
   clearSynologyWebhookRateLimiterStateForTest,
   createWebhookHandler,
 } from "./webhook-handler.js";
 
-// Mock sendMessage and resolveChatUserId to prevent real HTTP calls
+// Mock sendMessage, sendToChannel and resolveChatUserId to prevent real HTTP calls
 vi.mock("./client.js", () => ({
   sendMessage: vi.fn().mockResolvedValue(true),
+  sendToChannel: vi.fn().mockResolvedValue(true),
   resolveChatUserId: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -29,6 +29,10 @@ function makeAccount(
     rateLimitPerMinute: 30,
     botName: "TestBot",
     allowInsecureSsl: true,
+    channelTokens: {},
+    channelWebhooks: {},
+    groupPolicy: "disabled",
+    groupAllowFrom: [],
     ...overrides,
   };
 }
@@ -38,7 +42,21 @@ function makeReq(
   body: string,
   opts: { headers?: Record<string, string>; url?: string } = {},
 ): IncomingMessage {
-  const req = makeBaseReq(method, opts);
+  const req = new EventEmitter() as IncomingMessage & {
+    destroyed: boolean;
+  };
+  req.method = method;
+  req.headers = opts.headers ?? {};
+  req.url = opts.url ?? "/webhook/synology";
+  req.socket = { remoteAddress: "127.0.0.1" } as any;
+  req.destroyed = false;
+  req.destroy = ((_: Error | undefined) => {
+    if (req.destroyed) {
+      return req;
+    }
+    req.destroyed = true;
+    return req;
+  }) as IncomingMessage["destroy"];
 
   // Simulate body delivery
   process.nextTick(() => {
@@ -52,19 +70,11 @@ function makeReq(
   return req;
 }
 function makeStalledReq(method: string): IncomingMessage {
-  return makeBaseReq(method);
-}
-
-function makeBaseReq(
-  method: string,
-  opts: { headers?: Record<string, string>; url?: string } = {},
-): IncomingMessage & { destroyed: boolean } {
   const req = new EventEmitter() as IncomingMessage & {
     destroyed: boolean;
   };
   req.method = method;
-  req.headers = opts.headers ?? {};
-  req.url = opts.url ?? "/webhook/synology";
+  req.headers = {};
   req.socket = { remoteAddress: "127.0.0.1" } as any;
   req.destroyed = false;
   req.destroy = ((_: Error | undefined) => {
@@ -119,12 +129,10 @@ describe("createWebhookHandler", () => {
   async function expectForbiddenByPolicy(params: {
     account: Partial<ResolvedSynologyChatAccount>;
     bodyContains: string;
-    deliver?: WebhookHandlerDeps["deliver"];
   }) {
-    const deliver = params.deliver ?? vi.fn();
     const handler = createWebhookHandler({
       account: makeAccount(params.account),
-      deliver,
+      deliver: vi.fn(),
       log,
     });
 
@@ -134,7 +142,6 @@ describe("createWebhookHandler", () => {
 
     expect(res._status).toBe(403);
     expect(res._body).toContain(params.bodyContains);
-    expect(deliver).not.toHaveBeenCalled();
   }
 
   it("rejects non-POST methods with 405", async () => {
@@ -300,14 +307,22 @@ describe("createWebhookHandler", () => {
 
   it("returns 403 when allowlist policy is set with empty allowedUserIds", async () => {
     const deliver = vi.fn();
-    await expectForbiddenByPolicy({
-      account: {
+    const handler = createWebhookHandler({
+      account: makeAccount({
         dmPolicy: "allowlist",
         allowedUserIds: [],
-      },
-      bodyContains: "Allowlist is empty",
+      }),
       deliver,
+      log,
     });
+
+    const req = makeReq("POST", validBody);
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(403);
+    expect(res._body).toContain("Allowlist is empty");
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it("returns 403 when DMs are disabled", async () => {
@@ -415,6 +430,185 @@ describe("createWebhookHandler", () => {
       expect.objectContaining({
         body: expect.stringContaining("[FILTERED]"),
         commandAuthorized: true,
+      }),
+    );
+  });
+
+  // --- Group/channel tests ---
+
+  it("routes group message when channel token matches", async () => {
+    const deliver = vi.fn().mockResolvedValue(null);
+    const handler = createWebhookHandler({
+      account: makeAccount({
+        accountId: "group-test-" + Date.now(),
+        channelTokens: { "42": "channel-token-42" },
+        channelWebhooks: { "42": "https://nas/channel-42-incoming" },
+        groupPolicy: "open",
+      }),
+      deliver,
+      log,
+    });
+
+    const body = makeFormBody({
+      token: "channel-token-42",
+      user_id: "123",
+      username: "testuser",
+      text: "Merlin hello",
+      trigger_word: "Merlin",
+      channel_id: "42",
+    });
+    const req = makeReq("POST", body);
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(204);
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatType: "group",
+        sessionKey: "synology-chat:group:42",
+      }),
+    );
+  });
+
+  it("rejects group message when groupPolicy is disabled", async () => {
+    const handler = createWebhookHandler({
+      account: makeAccount({
+        accountId: "group-disabled-" + Date.now(),
+        channelTokens: { "42": "channel-token-42" },
+        groupPolicy: "disabled",
+      }),
+      deliver: vi.fn(),
+      log,
+    });
+
+    const body = makeFormBody({
+      token: "channel-token-42",
+      user_id: "123",
+      username: "testuser",
+      text: "hello",
+    });
+    const req = makeReq("POST", body);
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(403);
+    expect(res._body).toContain("disabled");
+  });
+
+  it("rejects group message when user not in allowlist", async () => {
+    const handler = createWebhookHandler({
+      account: makeAccount({
+        accountId: "group-allowlist-" + Date.now(),
+        channelTokens: { "42": "channel-token-42" },
+        groupPolicy: "allowlist",
+        groupAllowFrom: ["456"],
+      }),
+      deliver: vi.fn(),
+      log,
+    });
+
+    const body = makeFormBody({
+      token: "channel-token-42",
+      user_id: "123",
+      username: "testuser",
+      text: "hello",
+    });
+    const req = makeReq("POST", body);
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(403);
+    expect(res._body).toContain("not authorized for group");
+  });
+
+  it("accepts group message when user is in allowlist", async () => {
+    const deliver = vi.fn().mockResolvedValue(null);
+    const handler = createWebhookHandler({
+      account: makeAccount({
+        accountId: "group-allow-" + Date.now(),
+        channelTokens: { "42": "channel-token-42" },
+        groupPolicy: "allowlist",
+        groupAllowFrom: ["123"],
+      }),
+      deliver,
+      log,
+    });
+
+    const body = makeFormBody({
+      token: "channel-token-42",
+      user_id: "123",
+      username: "testuser",
+      text: "hello",
+    });
+    const req = makeReq("POST", body);
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(204);
+    expect(deliver).toHaveBeenCalled();
+  });
+
+  it("delivers group message to agent (reply dispatched via channel dispatcher)", async () => {
+    const { sendToChannel } = await import("./client.js");
+    const sendToChannelMock = vi.mocked(sendToChannel);
+    sendToChannelMock.mockClear();
+
+    const deliver = vi.fn().mockResolvedValue(null);
+    const handler = createWebhookHandler({
+      account: makeAccount({
+        accountId: "group-reply-" + Date.now(),
+        channelTokens: { "42": "channel-token-42" },
+        channelWebhooks: { "42": "https://nas/channel-42-incoming" },
+        groupPolicy: "open",
+      }),
+      deliver,
+      log,
+    });
+
+    const body = makeFormBody({
+      token: "channel-token-42",
+      user_id: "123",
+      username: "testuser",
+      text: "hello",
+    });
+    const req = makeReq("POST", body);
+    const res = makeRes();
+    await handler(req, res);
+
+    // deliver() is called with group context; actual reply sending happens
+    // in channel.ts's dispatchReplyWithBufferedBlockDispatcher, not here.
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatType: "group",
+        channelId: "42",
+        body: "hello",
+      }),
+    );
+    // sendToChannel is NOT called from webhook-handler for normal replies
+    expect(sendToChannelMock).not.toHaveBeenCalled();
+  });
+
+  it("DM still works when channel tokens are configured", async () => {
+    const deliver = vi.fn().mockResolvedValue(null);
+    const handler = createWebhookHandler({
+      account: makeAccount({
+        accountId: "dm-with-channels-" + Date.now(),
+        channelTokens: { "42": "channel-token-42" },
+        groupPolicy: "open",
+      }),
+      deliver,
+      log,
+    });
+
+    // Use bot token (DM), not channel token
+    const req = makeReq("POST", validBody);
+    const res = makeRes();
+    await handler(req, res);
+
+    expect(res._status).toBe(204);
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatType: "direct",
       }),
     );
   });

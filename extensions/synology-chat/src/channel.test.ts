@@ -37,9 +37,9 @@ describe("createSynologyChatPlugin", () => {
   });
 
   describe("capabilities", () => {
-    it("supports direct chat with media", () => {
+    it("supports direct and group chat with media", () => {
       const plugin = createSynologyChatPlugin();
-      expect(plugin.capabilities.chatTypes).toEqual(["direct"]);
+      expect(plugin.capabilities.chatTypes).toEqual(["direct", "group"]);
       expect(plugin.capabilities.media).toBe(true);
       expect(plugin.capabilities.threads).toBe(false);
     });
